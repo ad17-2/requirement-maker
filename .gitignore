@@ -1,0 +1,28 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# Media & generated output
+*.mp3
+*.mp4
+*.m4a
+*.wav
+*.webm
+*.mkv
+*.avi
+*.mov
+*_requirements.md
+
+# OS
+.DS_Store
+
+# IDE / tooling
+.claude/
+.idea/
+.vscode/
+*.swp
