@@ -1,4 +1,6 @@
+import json
 from dataclasses import dataclass
+from typing import Any
 
 import anthropic
 
@@ -56,3 +58,18 @@ def generate_requirements(
 
     text_blocks = [block.text for block in message.content if block.type == "text"]
     return "\n".join(text_blocks)
+
+
+def generate_structured_json(
+    prompt: str,
+    api_key: str,
+    config: GenerationConfig,
+) -> dict[str, Any]:
+    response = generate_requirements(prompt, api_key, config)
+    try:
+        parsed = json.loads(response)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"provider returned invalid JSON: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("provider returned JSON that is not an object")
+    return parsed

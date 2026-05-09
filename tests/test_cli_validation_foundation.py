@@ -1,8 +1,19 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 from click.testing import CliRunner
 
 from requirement_maker import cli
+
+
+class FakeTrace:
+    final_artifacts: dict[str, str]
+
+    def __init__(self) -> None:
+        self.final_artifacts = {}
+
+    def to_dict(self) -> dict[str, object]:
+        return {"entries": [], "final_artifacts": self.final_artifacts}
 
 
 def test_cli_missing_credentials_fails_before_pipeline(monkeypatch):
@@ -43,15 +54,18 @@ def test_cli_success_path_uses_mocked_boundaries(monkeypatch):
         on_chunk_done(1, 1)
         return "Mocked transcript"
 
-    def fake_generate_requirements(transcript: str, anthropic_key: str, config):  # noqa: ANN001
-        calls.append(f"generate:{anthropic_key}:{config.model}:{transcript}")
-        return "# Requirements\n\nGenerated from mocked providers.\n"
+    def fake_run_agentic_workflow(transcript: str, provider, config):  # noqa: ANN001
+        calls.append(f"generate:{config.model}:{transcript}")
+        return SimpleNamespace(
+            markdown="# Requirements\n\nGenerated from mocked providers.\n",
+            trace=FakeTrace(),
+        )
 
     monkeypatch.setenv("OPENAI_API_KEY", "dummy-openai-key")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy-anthropic-key")
     monkeypatch.setattr(cli, "prepare_audio", fake_prepare_audio)
     monkeypatch.setattr(cli, "transcribe_chunks", fake_transcribe_chunks)
-    monkeypatch.setattr(cli, "generate_requirements", fake_generate_requirements)
+    monkeypatch.setattr(cli, "run_agentic_workflow", fake_run_agentic_workflow)
 
     with runner.isolated_filesystem():
         Path("meeting.mp3").write_bytes(b"fake audio")
@@ -65,7 +79,7 @@ def test_cli_success_path_uses_mocked_boundaries(monkeypatch):
     assert calls == [
         "prepare:meeting.mp3",
         "transcribe:dummy-openai-key:1:whisper-1:10:60.0:2",
-        "generate:dummy-anthropic-key:claude-sonnet-4-5-20250929:Mocked transcript",
+        "generate:claude-sonnet-4-5-20250929:Mocked transcript",
     ]
 
 
@@ -78,14 +92,14 @@ def test_cli_custom_output_path_uses_mocked_boundaries(monkeypatch):
     async def fake_transcribe_chunks(audio_paths, openai_key, on_chunk_done, config):  # noqa: ANN001, ANN202
         return "Transcript"
 
-    def fake_generate_requirements(transcript: str, anthropic_key: str, config) -> str:  # noqa: ANN001
-        return "Custom output"
+    def fake_run_agentic_workflow(transcript: str, provider, config):  # noqa: ANN001
+        return SimpleNamespace(markdown="Custom output", trace=FakeTrace())
 
     monkeypatch.setenv("OPENAI_API_KEY", "dummy-openai-key")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy-anthropic-key")
     monkeypatch.setattr(cli, "prepare_audio", fake_prepare_audio)
     monkeypatch.setattr(cli, "transcribe_chunks", fake_transcribe_chunks)
-    monkeypatch.setattr(cli, "generate_requirements", fake_generate_requirements)
+    monkeypatch.setattr(cli, "run_agentic_workflow", fake_run_agentic_workflow)
 
     with runner.isolated_filesystem():
         Path("meeting.mp3").write_bytes(b"fake audio")
@@ -355,8 +369,8 @@ def test_output_path_edge_cases_are_validated_before_pipeline(monkeypatch):
 def test_atomic_write_preserves_previous_output_on_failure(monkeypatch):
     runner = CliRunner()
 
-    def fake_generate_requirements(transcript: str, anthropic_key: str, config) -> str:  # noqa: ANN001
-        return "new requirements"
+    def fake_run_agentic_workflow(transcript: str, provider, config):  # noqa: ANN001
+        return SimpleNamespace(markdown="new requirements", trace=FakeTrace())
 
     async def fake_prepare_audio(input_file: Path, temp_dir: Path) -> list[Path]:
         return [input_file]
@@ -371,7 +385,7 @@ def test_atomic_write_preserves_previous_output_on_failure(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy-anthropic-key")
     monkeypatch.setattr(cli, "prepare_audio", fake_prepare_audio)
     monkeypatch.setattr(cli, "transcribe_chunks", fake_transcribe_chunks)
-    monkeypatch.setattr(cli, "generate_requirements", fake_generate_requirements)
+    monkeypatch.setattr(cli, "run_agentic_workflow", fake_run_agentic_workflow)
     monkeypatch.setattr(cli, "_replace_file", fail_replace)
 
     with runner.isolated_filesystem():

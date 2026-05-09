@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import shutil
 import tempfile
@@ -10,9 +11,13 @@ import click
 from dotenv import find_dotenv, load_dotenv
 
 from requirement_maker.audio import MediaPreparationError, SUPPORTED_EXTENSIONS, prepare_audio
-from requirement_maker.generate import GenerationConfig, generate_requirements
 from requirement_maker.provider_errors import ProviderError, format_provider_cli_error
 from requirement_maker.transcribe import TranscriptionConfig, transcribe_chunks
+from requirement_maker.workflow import (
+    WorkflowConfig,
+    make_workflow_provider,
+    run_agentic_workflow,
+)
 
 
 DEFAULT_REQUIREMENT_MODEL = "claude-sonnet-4-5-20250929"
@@ -202,6 +207,10 @@ def _atomic_write_text(output: Path, content: str) -> None:
             temp_path.unlink(missing_ok=True)
 
 
+def _trace_output_path(output: Path) -> Path:
+    return output.with_name(f"{output.stem}.trace.json")
+
+
 def _run_doctor() -> None:
     load_dotenv(dotenv_path=find_dotenv(usecwd=True))
     click.echo("Diagnostics")
@@ -256,14 +265,27 @@ async def run_pipeline(
             )
         except ProviderError as exc:
             raise click.ClickException(format_provider_cli_error(exc)) from exc
+        except ValueError as exc:
+            raise click.ClickException(f"Requirement workflow failed: {exc}") from exc
         _echo(f"  Transcript: {len(transcript)} characters", config)
 
-        _echo(f"Generating requirements (model: {config.requirement_model})...", config)
+        _echo("Planning extraction units...", config)
+        _echo("Running structured extraction...", config)
+        _echo("Merging and deduplicating structured state...", config)
+        _echo("Running critic review...", config)
+        _echo("Writing final requirements...", config)
         try:
-            requirements = generate_requirements(
+            workflow_result = run_agentic_workflow(
                 transcript,
-                anthropic_key,
-                GenerationConfig(
+                make_workflow_provider(
+                    anthropic_key,
+                    WorkflowConfig(
+                        model=config.requirement_model,
+                        timeout=config.timeout,
+                        retries=config.retries,
+                    ),
+                ),
+                WorkflowConfig(
                     model=config.requirement_model,
                     timeout=config.timeout,
                     retries=config.retries,
@@ -272,8 +294,18 @@ async def run_pipeline(
         except ProviderError as exc:
             raise click.ClickException(format_provider_cli_error(exc)) from exc
 
-    _atomic_write_text(output, requirements)
+    trace_output = _trace_output_path(output)
+    workflow_result.trace.final_artifacts = {
+        "markdown": str(output),
+        "trace": str(trace_output),
+    }
+    _atomic_write_text(output, workflow_result.markdown)
+    _atomic_write_text(
+        trace_output,
+        json.dumps(workflow_result.trace.to_dict(), indent=2, sort_keys=True) + "\n",
+    )
     _echo(f"Done: {output}", config)
+    _echo(f"Trace: {trace_output}", config)
 
 
 @click.command(

@@ -13,13 +13,13 @@ def test_corrupt_supported_media_fails_without_provider_calls(monkeypatch):
     async def fail_transcribe_chunks(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
         raise AssertionError("transcription should not run after media preparation failure")
 
-    def fail_generate_requirements(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+    def fail_run_agentic_workflow(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
         raise AssertionError("generation should not run after media preparation failure")
 
     monkeypatch.setenv("OPENAI_API_KEY", "dummy-openai-key")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy-anthropic-key")
     monkeypatch.setattr(cli, "transcribe_chunks", fail_transcribe_chunks)
-    monkeypatch.setattr(cli, "generate_requirements", fail_generate_requirements)
+    monkeypatch.setattr(cli, "run_agentic_workflow", fail_run_agentic_workflow)
 
     with runner.isolated_filesystem():
         Path("corrupt.mp3").write_bytes(b"not real mp3")

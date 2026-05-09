@@ -66,14 +66,14 @@ def test_transcription_provider_failure_is_stage_specific_and_leaves_no_output(m
             provider="OpenAI",
         )
 
-    def fail_generate_requirements(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+    def fail_run_agentic_workflow(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
         raise AssertionError("generation should not run after transcription failure")
 
     monkeypatch.setenv("OPENAI_API_KEY", "dummy-openai-key")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy-anthropic-key")
     monkeypatch.setattr(cli, "prepare_audio", fake_prepare_audio)
     monkeypatch.setattr(cli, "transcribe_chunks", fail_transcribe_chunks)
-    monkeypatch.setattr(cli, "generate_requirements", fail_generate_requirements)
+    monkeypatch.setattr(cli, "run_agentic_workflow", fail_run_agentic_workflow)
 
     with runner.isolated_filesystem():
         Path("meeting.mp3").write_bytes(b"fake audio")
@@ -99,7 +99,7 @@ def test_generation_provider_failure_is_stage_specific_and_leaves_existing_outpu
     async def fake_transcribe_chunks(audio_paths, openai_key, on_chunk_done, config):  # noqa: ANN001, ANN202
         return "Transcript"
 
-    def fail_generate_requirements(transcript: str, anthropic_key: str, config):  # noqa: ANN001
+    def fail_run_agentic_workflow(transcript: str, provider, config):  # noqa: ANN001
         raise classify_provider_exception(
             BadRequestError("invalid model for request"),
             stage=ProviderStage.REQUIREMENT_GENERATION,
@@ -110,7 +110,7 @@ def test_generation_provider_failure_is_stage_specific_and_leaves_existing_outpu
     monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy-anthropic-key")
     monkeypatch.setattr(cli, "prepare_audio", fake_prepare_audio)
     monkeypatch.setattr(cli, "transcribe_chunks", fake_transcribe_chunks)
-    monkeypatch.setattr(cli, "generate_requirements", fail_generate_requirements)
+    monkeypatch.setattr(cli, "run_agentic_workflow", fail_run_agentic_workflow)
 
     with runner.isolated_filesystem():
         Path("meeting.mp3").write_bytes(b"fake audio")
