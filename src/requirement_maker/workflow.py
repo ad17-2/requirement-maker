@@ -380,6 +380,9 @@ class WorkflowConfig:
     model: str
     timeout: float = 60.0
     retries: int = 2
+    transcript_chunk_chars: int = 6000
+    request_budget_chars: int | None = None
+    repair_attempts: int = 1
 
 
 @dataclass(frozen=True)
@@ -464,7 +467,7 @@ class AgenticWorkflow:
         self._call_count = 0
 
     def run(self, transcript: str) -> WorkflowResult:
-        chunks = chunk_transcript(transcript)
+        chunks = chunk_transcript(transcript, max_chunk_chars=self.config.transcript_chunk_chars)
         valid_chunk_ids = {chunk.id for chunk in chunks}
         plan = self._plan(chunks, valid_chunk_ids)
         extractions = [
@@ -491,29 +494,125 @@ class AgenticWorkflow:
         call_id = self._next_call_id(stage)
         return WorkflowProviderRequest(
             stage=stage,
-            payload=json.dumps(payload, sort_keys=True),
+            payload=self._encode_payload(stage, payload),
             model=self.config.model,
             call_id=call_id,
             unit_id=unit_id,
         )
 
+    def _encode_payload(self, stage: str, payload: dict[str, Any]) -> str:
+        encoded = json.dumps(payload, sort_keys=True)
+        budget = self.config.request_budget_chars
+        if budget is not None and len(encoded) > budget:
+            raise ValueError(
+                f"{stage} provider request exceeds configured budget "
+                f"({len(encoded)} > {budget} characters)"
+            )
+        return encoded
+
+    def _complete_json(
+        self,
+        request: WorkflowProviderRequest,
+        parser: Any,
+        *,
+        trace_stage: str,
+        trace_role: str,
+        input_artifact_ids: list[str],
+    ) -> tuple[Any, int]:
+        retries_used = 0
+        repair_used = 0
+        while True:
+            try:
+                raw = self.provider.complete_json(request)
+                return parser(raw), retries_used
+            except Exception as exc:
+                from requirement_maker.provider_errors import ProviderError, retry_exhausted
+
+                if isinstance(exc, ProviderError):
+                    if exc.transient and retries_used < self.config.retries:
+                        retries_used += 1
+                        continue
+                    if exc.transient:
+                        raise retry_exhausted(exc) from exc
+                    raise
+                if repair_used < self.config.repair_attempts:
+                    repair_used += 1
+                    self.trace.add(
+                        stage=trace_stage,
+                        role=trace_role,
+                        input_artifact_ids=input_artifact_ids,
+                        output_artifact_ids=[],
+                        provider=self._provider_meta(request.call_id),
+                        status="repair",
+                        retry_count=repair_used,
+                    )
+                    continue
+                raise ValueError(
+                    f"{request.stage} exhausted repair attempts after malformed response: {exc}"
+                ) from exc
+
+    def _write_markdown(self, request: WorkflowProviderRequest) -> tuple[str, int]:
+        retries_used = 0
+        while True:
+            try:
+                return self.provider.write_markdown(request), retries_used
+            except Exception as exc:
+                from requirement_maker.provider_errors import ProviderError, retry_exhausted
+
+                if isinstance(exc, ProviderError):
+                    if exc.transient and retries_used < self.config.retries:
+                        retries_used += 1
+                        continue
+                    if exc.transient:
+                        raise retry_exhausted(exc) from exc
+                    raise
+                raise
+
     def _plan(self, chunks: list[TranscriptChunk], valid_chunk_ids: set[str]) -> WorkflowPlan:
+        payload = {
+            "instruction": "Create extraction units before any extraction. Return JSON with units.",
+            "required_unit_fields": ["id", "focus", "source_chunk_ids"],
+            "chunks": self._budgeted_chunk_dicts(chunks),
+        }
+        if self.config.request_budget_chars is not None:
+            encoded = json.dumps(payload, sort_keys=True)
+            if len(encoded) > self.config.request_budget_chars:
+                plan = WorkflowPlan(
+                    units=[
+                        PlanUnit(
+                            id=f"unit-{chunk.id}",
+                            focus=f"Transcript chunk {chunk.id}",
+                            source_chunk_ids=[chunk.id],
+                        )
+                        for chunk in chunks
+                    ]
+                )
+                self.trace.add(
+                    stage="planning",
+                    role="planner",
+                    input_artifact_ids=[chunk.id for chunk in chunks],
+                    output_artifact_ids=[unit.id for unit in plan.units],
+                    provider={"provider": "local", "model": "budgeted", "call_id": "local-planner-0001"},
+                )
+                return plan
         request = self._request(
             stage="planner",
-            payload={
-                "instruction": "Create extraction units before any extraction. Return JSON with units.",
-                "required_unit_fields": ["id", "focus", "source_chunk_ids"],
-                "chunks": [chunk.to_dict() for chunk in chunks],
-            },
+            payload=payload,
         )
-        data = self.provider.complete_json(request)
-        plan = WorkflowPlan.from_dict(data, valid_chunk_ids)
+        plan, retries_used = self._complete_json(
+            request,
+            lambda data: WorkflowPlan.from_dict(data, valid_chunk_ids),
+            trace_stage="planning",
+            trace_role="planner",
+            input_artifact_ids=[chunk.id for chunk in chunks],
+        )
         self.trace.add(
             stage="planning",
             role="planner",
             input_artifact_ids=[chunk.id for chunk in chunks],
             output_artifact_ids=[unit.id for unit in plan.units],
             provider=self._provider_meta(request.call_id),
+            retry_count=retries_used,
         )
         return plan
 
@@ -552,12 +651,17 @@ class AgenticWorkflow:
                 "chunks": [chunk.to_dict() for chunk in selected_chunks],
             },
         )
-        data = self.provider.complete_json(request)
-        extraction = ExtractionState.from_dict(
-            data,
-            unit_id=unit.id,
-            valid_chunk_ids=valid_chunk_ids,
-            id_allocator=self.id_allocator,
+        extraction, retries_used = self._complete_json(
+            request,
+            lambda data: ExtractionState.from_dict(
+                data,
+                unit_id=unit.id,
+                valid_chunk_ids=valid_chunk_ids,
+                id_allocator=self.id_allocator,
+            ),
+            trace_stage="extraction",
+            trace_role="extractor",
+            input_artifact_ids=[unit.id, *unit.source_chunk_ids],
         )
         unit.status = "processed"
         self.trace.add(
@@ -566,6 +670,7 @@ class AgenticWorkflow:
             input_artifact_ids=[unit.id, *unit.source_chunk_ids],
             output_artifact_ids=[item.id for item in extraction.items],
             provider=self._provider_meta(request.call_id),
+            retry_count=retries_used,
         )
         return extraction
 
@@ -622,16 +727,21 @@ class AgenticWorkflow:
                     "duplicates, contradictions, and weak acceptance criteria. Return corrections."
                 ),
                 "plan": plan.to_dict(),
-                "chunks": [chunk.to_dict() for chunk in chunks],
+                "chunks": self._budgeted_chunk_dicts(chunks),
                 "items": [item.to_dict() for item in merged_items],
                 "conflicts": [item.to_dict() for item in conflicts],
             },
         )
-        data = self.provider.complete_json(request)
-        review = CriticReview.from_dict(
-            data,
-            valid_chunk_ids=valid_chunk_ids,
-            id_allocator=self.id_allocator,
+        review, retries_used = self._complete_json(
+            request,
+            lambda data: CriticReview.from_dict(
+                data,
+                valid_chunk_ids=valid_chunk_ids,
+                id_allocator=self.id_allocator,
+            ),
+            trace_stage="critic",
+            trace_role="critic",
+            input_artifact_ids=[item.id for item in merged_items] + [item.id for item in conflicts],
         )
         self.trace.add(
             stage="critic",
@@ -640,6 +750,7 @@ class AgenticWorkflow:
             output_artifact_ids=[finding.id for finding in review.findings]
             + [item.id for item in review.add_open_questions],
             provider=self._provider_meta(request.call_id),
+            retry_count=retries_used,
         )
         return review
 
@@ -709,10 +820,10 @@ class AgenticWorkflow:
                     "Write final Markdown only from this reviewed structured state. "
                     "Do not introduce unsupported requirement IDs or claims."
                 ),
-                **final_state.to_dict(),
+                **self._writer_state_dict(final_state),
             },
         )
-        markdown = self.provider.write_markdown(request)
+        markdown, retries_used = self._write_markdown(request)
         allowed_ids = _final_item_ids(final_state)
         unknown_ids = {
             token
@@ -727,8 +838,28 @@ class AgenticWorkflow:
             input_artifact_ids=sorted(allowed_ids),
             output_artifact_ids=["markdown"],
             provider=self._provider_meta(request.call_id),
+            retry_count=retries_used,
         )
         return markdown
+
+    def _writer_state_dict(self, final_state: FinalWorkflowState) -> dict[str, Any]:
+        state = final_state.to_dict()
+        if self.config.request_budget_chars is None:
+            return state
+        state["chunks"] = [
+            {key: value for key, value in chunk.items() if key != "text"}
+            for chunk in state["chunks"]
+        ]
+        return state
+
+    def _budgeted_chunk_dicts(self, chunks: list[TranscriptChunk]) -> list[dict[str, int | str]]:
+        data = [chunk.to_dict() for chunk in chunks]
+        if self.config.request_budget_chars is None:
+            return data
+        return [
+            {key: value for key, value in chunk.items() if key != "text"}
+            for chunk in data
+        ]
 
 
 def make_workflow_provider(api_key: str, config: WorkflowConfig) -> WorkflowProvider:
@@ -743,11 +874,13 @@ def run_agentic_workflow(
     return AgenticWorkflow(provider, config).run(transcript)
 
 
-def chunk_transcript(transcript: str) -> list[TranscriptChunk]:
+def chunk_transcript(transcript: str, max_chunk_chars: int = 6000) -> list[TranscriptChunk]:
+    if max_chunk_chars <= 0:
+        raise ValueError("max_chunk_chars must be positive")
     text = transcript.strip()
     if not text:
         raise ValueError("transcript is empty")
-    parts = [part.strip() for part in text.split("\n\n") if part.strip()]
+    parts = _split_transcript_parts(text, max_chunk_chars)
     if not parts:
         parts = [text]
     chunks: list[TranscriptChunk] = []
@@ -767,6 +900,37 @@ def chunk_transcript(transcript: str) -> list[TranscriptChunk]:
         )
         cursor = end
     return chunks
+
+
+def _split_transcript_parts(text: str, max_chunk_chars: int) -> list[str]:
+    paragraphs = [part.strip() for part in text.split("\n\n") if part.strip()]
+    if not paragraphs:
+        paragraphs = [text]
+    parts: list[str] = []
+    for paragraph in paragraphs:
+        if len(paragraph) > max_chunk_chars:
+            parts.extend(_split_long_text(paragraph, max_chunk_chars))
+        else:
+            parts.append(paragraph)
+    return parts
+
+
+def _split_long_text(text: str, max_chunk_chars: int) -> list[str]:
+    parts: list[str] = []
+    cursor = 0
+    while cursor < len(text):
+        hard_end = min(cursor + max_chunk_chars, len(text))
+        if hard_end == len(text):
+            parts.append(text[cursor:hard_end])
+            break
+        split_at = text.rfind(" ", cursor + 1, hard_end)
+        if split_at <= cursor:
+            split_at = hard_end
+        else:
+            split_at += 1
+        parts.append(text[cursor:split_at])
+        cursor = split_at
+    return parts
 
 
 def generate_structured_markdown(

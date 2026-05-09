@@ -9,8 +9,10 @@ from requirement_maker.workflow import (
     WorkflowConfig,
     WorkflowProvider,
     WorkflowProviderRequest,
+    chunk_transcript,
     run_agentic_workflow,
 )
+from requirement_maker.provider_errors import ProviderError, ProviderErrorKind, ProviderStage
 
 
 class FixtureProvider(WorkflowProvider):
@@ -261,3 +263,179 @@ def test_cli_exposes_agentic_workflow_and_writes_trace(monkeypatch) -> None:
         "writer",
     ]
     assert all("call_id" in entry["provider"] for entry in trace["entries"] if entry["role"] != "local")
+
+
+def test_transcript_chunking_is_deterministic_complete_and_budgeted() -> None:
+    transcript = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda"
+
+    first = chunk_transcript(transcript, max_chunk_chars=18)
+    second = chunk_transcript(transcript, max_chunk_chars=18)
+
+    assert [chunk.to_dict() for chunk in first] == [chunk.to_dict() for chunk in second]
+    assert [chunk.id for chunk in first] == ["chunk-0001", "chunk-0002", "chunk-0003", "chunk-0004"]
+    assert all(len(chunk.text) <= 18 for chunk in first)
+    assert "".join(transcript[chunk.start_char:chunk.end_char] for chunk in first) == transcript
+    assert [(chunk.start_char, chunk.end_char) for chunk in first] == [
+        (0, 17),
+        (17, 31),
+        (31, 46),
+        (46, 63),
+    ]
+
+
+def test_long_transcript_requests_respect_configured_budget_and_cover_every_chunk() -> None:
+    class BudgetProvider(WorkflowProvider):
+        def __init__(self) -> None:
+            self.requests: list[WorkflowProviderRequest] = []
+
+        def complete_json(self, request: WorkflowProviderRequest) -> dict:
+            self.requests.append(request)
+            assert len(request.payload) <= 4000
+            if request.stage == "planner":
+                chunks = json.loads(request.payload)["chunks"]
+                return {
+                    "units": [
+                        {"id": f"unit-{chunk['id']}", "focus": chunk["id"], "source_chunk_ids": [chunk["id"]]}
+                        for chunk in chunks
+                    ]
+                }
+            if request.stage == "extractor":
+                chunk_id = json.loads(request.payload)["chunks"][0]["id"]
+                return {
+                    "decisions": [],
+                    "functional_requirements": [
+                        {
+                            "title": f"Requirement for {chunk_id}",
+                            "summary": f"Keep content from {chunk_id}.",
+                            "source_refs": [{"chunk_id": chunk_id, "snippet": chunk_id}],
+                        }
+                    ],
+                    "non_functional_requirements": [],
+                    "risks": [],
+                    "constraints": [],
+                    "open_questions": [],
+                    "out_of_scope": [],
+                    "task_candidates": [],
+                }
+            if request.stage == "critic":
+                return {"findings": [], "remove_item_ids": [], "add_open_questions": []}
+            raise AssertionError(request.stage)
+
+        def write_markdown(self, request: WorkflowProviderRequest) -> str:
+            self.requests.append(request)
+            assert len(request.payload) <= 4000
+            payload = json.loads(request.payload)
+            return "\n".join(item["id"] for item in payload["requirements"])
+
+    provider = BudgetProvider()
+    transcript = "\n\n".join(f"Topic {index} requires ordered feature {index}." for index in range(1, 7))
+
+    result = run_agentic_workflow(
+        transcript,
+        provider,
+        WorkflowConfig(model="claude-test", transcript_chunk_chars=60, request_budget_chars=4000),
+    )
+
+    assert [chunk.id for chunk in result.final_state.chunks] == [f"chunk-{index:04d}" for index in range(1, 7)]
+    assert {ref.chunk_id for item in result.final_state.requirements for ref in item.source_refs} == {
+        chunk.id for chunk in result.final_state.chunks
+    }
+    assert [request.stage for request in provider.requests].count("extractor") == 6
+
+
+def test_transient_provider_failures_retry_and_permanent_failures_do_not_retry() -> None:
+    class RetryProvider(FixtureProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.planner_attempts = 0
+
+        def complete_json(self, request: WorkflowProviderRequest) -> dict:
+            if request.stage == "planner":
+                self.requests.append(request)
+                self.planner_attempts += 1
+                if self.planner_attempts == 1:
+                    raise ProviderError(
+                        stage=ProviderStage.REQUIREMENT_GENERATION,
+                        kind=ProviderErrorKind.RATE_LIMIT,
+                        provider="Anthropic",
+                        detail="rate limit",
+                        transient=True,
+                    )
+                return {"units": [{"id": "unit-auth", "focus": "Only", "source_chunk_ids": ["chunk-0001"]}]}
+            if request.stage == "critic":
+                self.requests.append(request)
+                return {"findings": [], "remove_item_ids": [], "add_open_questions": []}
+            return super().complete_json(request)
+
+    provider = RetryProvider()
+    result = run_agentic_workflow("Authentication discussion.", provider, WorkflowConfig(model="claude-test", retries=1))
+
+    assert result.trace.entries[0].stage == "planning"
+    assert result.trace.entries[0].retry_count == 1
+    assert provider.planner_attempts == 2
+
+    class PermanentProvider(RetryProvider):
+        def complete_json(self, request: WorkflowProviderRequest) -> dict:
+            self.requests.append(request)
+            raise ProviderError(
+                stage=ProviderStage.REQUIREMENT_GENERATION,
+                kind=ProviderErrorKind.INVALID_REQUEST,
+                provider="Anthropic",
+                detail="bad model",
+                transient=False,
+            )
+
+    permanent = PermanentProvider()
+    try:
+        run_agentic_workflow("Authentication discussion.", permanent, WorkflowConfig(model="claude-test", retries=3))
+    except ProviderError as exc:
+        assert exc.kind is ProviderErrorKind.INVALID_REQUEST
+    else:
+        raise AssertionError("permanent failures must fail")
+    assert len(permanent.requests) == 1
+
+
+def test_malformed_responses_repair_with_trace_and_fail_after_limit() -> None:
+    class RepairProvider(FixtureProvider):
+        def __init__(self, always_bad: bool = False) -> None:
+            super().__init__()
+            self.always_bad = always_bad
+            self.extractor_attempts = 0
+
+        def complete_json(self, request: WorkflowProviderRequest) -> dict:
+            if request.stage == "planner":
+                self.requests.append(request)
+                return {"units": [{"id": "unit-auth", "focus": "Authentication", "source_chunk_ids": ["chunk-0001"]}]}
+            if request.stage == "extractor":
+                self.requests.append(request)
+                self.extractor_attempts += 1
+                if self.always_bad or self.extractor_attempts == 1:
+                    return {"decisions": []}
+                return FixtureProvider.complete_json(self, request)
+            if request.stage == "critic":
+                self.requests.append(request)
+                return {"findings": [], "remove_item_ids": [], "add_open_questions": []}
+            return FixtureProvider.complete_json(self, request)
+
+    repaired = RepairProvider()
+    result = run_agentic_workflow(
+        "Authentication discussion.",
+        repaired,
+        WorkflowConfig(model="claude-test", repair_attempts=1),
+    )
+
+    assert repaired.extractor_attempts == 2
+    assert any(entry.status == "repair" and entry.stage == "extraction" for entry in result.trace.entries)
+
+    broken = RepairProvider(always_bad=True)
+    try:
+        run_agentic_workflow(
+            "Authentication discussion.",
+            broken,
+            WorkflowConfig(model="claude-test", repair_attempts=1),
+        )
+    except ValueError as exc:
+        assert "exhausted repair attempts" in str(exc)
+    else:
+        raise AssertionError("malformed responses must fail after repair limit")
+    assert broken.extractor_attempts == 2

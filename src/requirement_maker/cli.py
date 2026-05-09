@@ -293,6 +293,8 @@ async def run_pipeline(
             )
         except ProviderError as exc:
             raise click.ClickException(format_provider_cli_error(exc)) from exc
+        except ValueError as exc:
+            raise click.ClickException(f"Requirement workflow failed: {exc}") from exc
 
     trace_output = _trace_output_path(output)
     workflow_result.trace.final_artifacts = {
