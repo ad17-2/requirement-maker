@@ -1,6 +1,7 @@
 import asyncio
 import os
 import shutil
+import tempfile
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -8,7 +9,7 @@ from pathlib import Path
 import click
 from dotenv import find_dotenv, load_dotenv
 
-from requirement_maker.audio import SUPPORTED_EXTENSIONS, prepare_audio
+from requirement_maker.audio import MediaPreparationError, SUPPORTED_EXTENSIONS, prepare_audio
 from requirement_maker.generate import GenerationConfig, generate_requirements
 from requirement_maker.transcribe import TranscriptionConfig, transcribe_chunks
 
@@ -54,11 +55,32 @@ def _supported_formats_text() -> str:
 def _validate_input_path(input_file: Path) -> None:
     if not input_file.exists():
         _fail(f"Input file not found: {input_file}")
+    if not input_file.is_file():
+        _fail(f"Input path is not a file: {input_file}")
     if input_file.suffix.lower() not in SUPPORTED_EXTENSIONS:
         _fail(
             f"Unsupported file type: {input_file.suffix or '<none>'}\n"
             f"Supported formats: {_supported_formats_text()}"
         )
+
+
+def _default_output_path(input_file: Path) -> Path:
+    return input_file.with_name(f"{input_file.stem}_requirements.md")
+
+
+def _validate_output_path(input_file: Path, output: Path, *, force: bool) -> Path:
+    if output.exists() and output.is_dir():
+        _fail(f"Output path is a directory: {output}")
+    parent = output.parent if str(output.parent) else Path(".")
+    if not parent.exists():
+        _fail(f"Output directory does not exist: {parent}")
+    if not parent.is_dir():
+        _fail(f"Output parent is not a directory: {parent}")
+    if input_file.resolve() == output.resolve():
+        _fail("Output path must differ from input path.")
+    if output.exists() and not force:
+        _fail(f"Output already exists: {output}\nUse --force to overwrite it.")
+    return output
 
 
 def _load_int_env(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -151,6 +173,34 @@ def _load_credentials() -> tuple[str, str]:
     return openai_key or "", anthropic_key or ""
 
 
+def _replace_file(src: Path, dst: Path) -> None:
+    src.replace(dst)
+
+
+def _atomic_write_text(output: Path, content: str) -> None:
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=output.parent,
+            prefix=f".{output.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temp_file:
+            temp_file.write(content)
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+            temp_path = Path(temp_file.name)
+        _replace_file(temp_path, output)
+        temp_path = None
+    except OSError as exc:
+        raise click.ClickException(f"Failed to write output {output}: {exc}") from exc
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+
+
 def _run_doctor() -> None:
     load_dotenv(dotenv_path=find_dotenv(usecwd=True))
     click.echo("Diagnostics")
@@ -178,39 +228,44 @@ async def run_pipeline(
 ) -> None:
     _echo(f"Processing: {input_file}", config)
 
-    _echo("Extracting audio...", config)
-    audio_chunks = await prepare_audio(input_file)
-    _echo(f"  {len(audio_chunks)} audio segment(s) ready", config)
+    with tempfile.TemporaryDirectory(prefix="requirement-maker-") as temp_dir_name:
+        temp_dir = Path(temp_dir_name)
+        _echo("Preparing media...", config)
+        try:
+            audio_chunks = await prepare_audio(input_file, temp_dir)
+        except MediaPreparationError as exc:
+            raise click.ClickException(f"Media preparation failed: {exc}") from exc
+        _echo(f"  {len(audio_chunks)} audio segment(s) ready", config)
 
-    def on_chunk_done(completed: int, total: int) -> None:
-        _echo(f"  Transcribed chunk {completed}/{total}", config)
+        def on_chunk_done(completed: int, total: int) -> None:
+            _echo(f"  Transcribed chunk {completed}/{total}", config)
 
-    _echo("Transcribing (parallel)...", config)
-    transcript = await transcribe_chunks(
-        audio_chunks,
-        openai_key,
-        on_chunk_done,
-        TranscriptionConfig(
-            model=config.transcription_model,
-            concurrency=config.concurrency,
-            timeout=config.timeout,
-            retries=config.retries,
-        ),
-    )
-    _echo(f"  Transcript: {len(transcript)} characters", config)
+        _echo("Transcribing (parallel)...", config)
+        transcript = await transcribe_chunks(
+            audio_chunks,
+            openai_key,
+            on_chunk_done,
+            TranscriptionConfig(
+                model=config.transcription_model,
+                concurrency=config.concurrency,
+                timeout=config.timeout,
+                retries=config.retries,
+            ),
+        )
+        _echo(f"  Transcript: {len(transcript)} characters", config)
 
-    _echo(f"Generating requirements (model: {config.requirement_model})...", config)
-    requirements = generate_requirements(
-        transcript,
-        anthropic_key,
-        GenerationConfig(
-            model=config.requirement_model,
-            timeout=config.timeout,
-            retries=config.retries,
-        ),
-    )
+        _echo(f"Generating requirements (model: {config.requirement_model})...", config)
+        requirements = generate_requirements(
+            transcript,
+            anthropic_key,
+            GenerationConfig(
+                model=config.requirement_model,
+                timeout=config.timeout,
+                retries=config.retries,
+            ),
+        )
 
-    output.write_text(requirements, encoding="utf-8")
+    _atomic_write_text(output, requirements)
     _echo(f"Done: {output}", config)
 
 
@@ -235,6 +290,7 @@ async def run_pipeline(
 @click.option("--retries", type=click.IntRange(0, 10), default=None, help="Provider retry count. Env: REQUIREMENT_MAKER_RETRIES.")
 @click.option("--verbose", is_flag=True, help="Print pipeline stages and resolved runtime configuration.")
 @click.option("--quiet", is_flag=True, help="Suppress non-error progress output on success.")
+@click.option("--force", is_flag=True, help="Overwrite an existing output file.")
 @click.option("--doctor", is_flag=True, help="Run safe environment diagnostics and setup guidance.")
 def main(
     input_file: Path | None,
@@ -246,6 +302,7 @@ def main(
     retries: int | None,
     verbose: bool,
     quiet: bool,
+    force: bool,
     doctor: bool,
 ) -> None:
     """Convert audio/video recordings into comprehensive requirement documents."""
@@ -255,9 +312,6 @@ def main(
     if input_file is None:
         raise click.UsageError("Missing argument 'INPUT_FILE'.")
     _validate_input_path(input_file)
-    if output is None:
-        output = input_file.with_name(f"{input_file.stem}_requirements.md")
-
     config = _resolve_config(
         model=model,
         transcription_model=transcription_model,
@@ -267,6 +321,10 @@ def main(
         verbose=verbose,
         quiet=quiet,
     )
+    if output is None:
+        output = _default_output_path(input_file)
+    output = _validate_output_path(input_file, output, force=force)
+
     openai_key, anthropic_key = _load_credentials()
     _print_runtime_config(config)
 
