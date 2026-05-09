@@ -1,237 +1,126 @@
 # requirement-maker
 
-`requirement-maker` is a CLI that turns meeting recordings into polished, source-linked requirements artifacts. It prepares audio/video with `ffmpeg`, transcribes with OpenAI, runs an explicit Anthropic-powered agentic workflow, and writes shareable planning outputs for engineers, PMs, and implementation agents.
+`requirement-maker` turns meeting audio or video into source-linked requirements artifacts. It prepares local media with `ffmpeg`, transcribes with OpenAI, generates requirements with Anthropic, and writes Markdown plus audit files.
 
-## Agentic workflow
-
-```text
-Input media (.mp3/.mp4/.m4a/.wav/.webm/...)
-  → ffmpeg/ffprobe media preparation
-  → OpenAI transcription
-  → Anthropic planner creates extraction units
-  → Anthropic extractor captures product signals with source references
-  → deterministic merge/dedupe consolidates duplicates and conflicts
-  → Anthropic critic reviews traceability, ambiguity, and weak criteria
-  → Anthropic writer produces final requirements
-  → Markdown, trace, manifest, and optional JSON/task exports
-```
-
-The normal command is still one step: provide a supported recording and receive a requirements Markdown file plus audit artifacts. No long-running services, web servers, databases, or ports are required.
-
-## Prerequisites
-
-- **Python 3.10+**. The project is validated with Python 3.11.
-- **ffmpeg and ffprobe**.
-  - macOS: `brew install ffmpeg`
-  - Ubuntu/Debian: `sudo apt install ffmpeg`
-- **OpenAI API key** for transcription (`OPENAI_API_KEY`).
-- **Anthropic API key** for planning, extraction, critique, and writing (`ANTHROPIC_API_KEY`).
-
-## Installation from a clean checkout
+## Quick start
 
 ```bash
-git clone https://github.com/AdrianAcala/requirement-maker.git
-cd requirement-maker
-
 python3 -m venv .venv
 .venv/bin/python -m pip install --upgrade pip
 .venv/bin/python -m pip install -e .
-```
 
-If your default `python3` is older than 3.10, create the virtual environment with a newer interpreter, for example `python3.11 -m venv .venv`.
-
-## Configuration
-
-Use environment variables or a local `.env` file. The `.env` file is for your machine only and must not be committed.
-
-```bash
 cp .env.example .env
-# Edit .env and set:
+# Edit .env with real values:
 # OPENAI_API_KEY=...
 # ANTHROPIC_API_KEY=...
+
+make doctor
+make req INPUT=meeting.mp4
 ```
 
-You can also export keys for a single shell session:
+Use `OUTPUT=spec.md` to choose the Markdown filename:
 
 ```bash
-export OPENAI_API_KEY="..."
-export ANTHROPIC_API_KEY="..."
+make req INPUT=meeting.mp4 OUTPUT=spec.md
 ```
 
-The CLI never prints secret values. Verbose output reports selected models and runtime settings, not credentials.
+## Common commands
 
-## Sanity check
+The Makefile is the easiest way to run the project:
 
-Run diagnostics before processing media:
+| Command | What it does |
+| --- | --- |
+| `make help` | Show available targets. |
+| `make doctor` | Check Python, package setup, `ffmpeg`, `ffprobe`, and configured credentials. |
+| `make req INPUT=meeting.mp4 [OUTPUT=spec.md]` | Generate Markdown requirements. |
+| `make req-json INPUT=meeting.mp4 [OUTPUT=spec.md]` | Generate Markdown plus structured JSON. |
+| `make req-tasks INPUT=meeting.mp4 [OUTPUT=spec.md]` | Generate Markdown plus task handoff JSON. |
+| `make req-demo` | Generate a tiny local `demo.wav` and demo artifacts. Requires API keys. |
+| `make test` | Run pytest. |
+| `make lint` | Run Ruff checks. |
+| `make typecheck` | Run mypy over `src`. |
+| `make check` | Run tests, lint, and typecheck. |
+
+## Direct CLI usage
+
+You can also run the installed CLI directly:
 
 ```bash
+.venv/bin/requirement-maker meeting.mp4
+.venv/bin/requirement-maker meeting.mp3 --output spec.md
+.venv/bin/requirement-maker meeting.mp4 --json --tasks --verbose
 .venv/bin/requirement-maker --doctor
 ```
 
-The doctor command checks Python, the installed package version, `ffmpeg`, `ffprobe`, and whether provider credentials are configured. It does not call paid provider APIs and does not overwrite config files.
+Useful options:
 
-## Usage
+| Option | Purpose |
+| --- | --- |
+| `-o`, `--output PATH` | Choose the Markdown output path. |
+| `--json` | Write a structured JSON export next to the Markdown. |
+| `--tasks` | Write a task handoff JSON export next to the Markdown. |
+| `--verbose` | Print pipeline stages and non-secret runtime settings. |
+| `--quiet` | Suppress non-error progress output. |
+| `--force` | Overwrite existing output artifacts. |
+| `--model TEXT` | Choose the Anthropic generation model. |
+| `--transcription-model TEXT` | Choose the OpenAI transcription model. |
+| `--concurrency INTEGER` | Set concurrent transcription calls. |
+| `--timeout FLOAT` | Set provider timeout in seconds. |
+| `--retries INTEGER` | Set provider retry count. |
+| `--doctor` | Run safe local diagnostics. |
 
-```bash
-# Basic: writes meeting_requirements.md, meeting_requirements.trace.json,
-# and meeting_requirements.manifest.json
-.venv/bin/requirement-maker meeting.mp4
+Run `.venv/bin/requirement-maker --help` for the full CLI help.
 
-# Custom Markdown output path
-.venv/bin/requirement-maker meeting.mp3 -o spec.md
+## Outputs
 
-# Include structured JSON and task handoff exports
-.venv/bin/requirement-maker meeting.mp4 --json --tasks
-
-# Show stage progress and resolved non-secret runtime configuration
-.venv/bin/requirement-maker meeting.mp4 --verbose
-
-# Use lower-cost or alternate models and tuned runtime settings
-.venv/bin/requirement-maker meeting.mp4 \
-  --model claude-haiku-4-5-20251001 \
-  --transcription-model whisper-1 \
-  --concurrency 4 \
-  --timeout 60 \
-  --retries 2
-```
-
-## CLI options
-
-| Flag | Default | Description |
-| --- | --- | --- |
-| `--version` | n/a | Print the installed `requirement-maker` version. |
-| `-o`, `--output PATH` | `<input_stem>_requirements.md` | Markdown output path. |
-| `--model TEXT` | `claude-sonnet-4-5-20250929` | Anthropic model for requirement-generation workflow stages. Can also be set with `REQUIREMENT_MAKER_MODEL`. |
-| `--transcription-model TEXT` | `whisper-1` | OpenAI transcription model. Can also be set with `REQUIREMENT_MAKER_TRANSCRIPTION_MODEL`. |
-| `--concurrency INTEGER` | `10` | Maximum concurrent transcription calls, from `1` to `50`. Can also be set with `REQUIREMENT_MAKER_CONCURRENCY`. |
-| `--timeout FLOAT` | `60.0` | Provider timeout in seconds. Can also be set with `REQUIREMENT_MAKER_TIMEOUT`. |
-| `--retries INTEGER` | `2` | Provider retry count, from `0` to `10`. Can also be set with `REQUIREMENT_MAKER_RETRIES`. |
-| `--verbose` | off | Print pipeline stages and resolved runtime configuration. |
-| `--quiet` | off | Suppress non-error progress output on success. |
-| `--force` | off | Replace existing output artifacts. Without this flag, existing outputs are protected before paid work starts. |
-| `--json` | off | Write a versioned structured JSON export next to Markdown. |
-| `--tasks` | off | Write a versioned task handoff JSON export next to Markdown. |
-| `--doctor` | off | Run safe local diagnostics and setup guidance. |
-| `-h`, `--help` | n/a | Print help and examples. |
-
-CLI flags take precedence over environment variables and `.env` values, which take precedence over built-in defaults. `--verbose` and `--quiet` are mutually exclusive.
-
-## Supported media
-
-- Audio: `.flac`, `.m4a`, `.mp3`, `.ogg`, `.wav`, `.webm`
-- Video: `.avi`, `.mkv`, `.mov`, `.mp4`, `.webm`
-
-Unsupported extensions, missing paths, corrupt media, invalid options, missing credentials, and existing output conflicts fail before downstream paid provider work whenever possible.
-
-## Outputs and naming
-
-Every successful run writes:
-
-- `*.md` — polished requirements document.
-- `*.trace.json` — audit trace for workflow stages, model metadata, retry counts, and final artifact paths.
-- `*.manifest.json` — list of generated artifact paths.
-
-Optional outputs:
-
-- `--json` writes `*.json` with schema version `requirements-export-v1`.
-- `--tasks` writes `*.tasks.json` with schema version `task-handoff-v1`.
-
-Default names are derived from the Markdown output. For `meeting.mp4`, the default artifacts are:
+For `meeting.mp4`, the default run writes:
 
 ```text
 meeting_requirements.md
 meeting_requirements.trace.json
 meeting_requirements.manifest.json
-meeting_requirements.json          # only with --json
-meeting_requirements.tasks.json    # only with --tasks
 ```
 
-The manifest stores relative public artifact paths when possible and verifies each listed artifact exists. Public Markdown, JSON, task exports, and manifest paths are sanitized to avoid API keys, authorization headers, and user-specific absolute paths.
+Optional exports add:
 
-## Markdown contents
-
-The generated requirements document includes:
-
-1. **Executive Summary**
-2. **Background & Context**
-3. **Goals & Objectives**
-4. **Functional Requirements**
-5. **Non-Functional Requirements**
-6. **User Flows & Scenarios**
-7. **Data Requirements**
-8. **Dependencies & Constraints**
-9. **Out of Scope**
-10. **Open Questions & Ambiguities**
-11. **Participants & Decisions**
-12. **Action & Task Candidates**
-13. **Source Traceability**
-
-Functional and non-functional requirements include stable IDs and acceptance-style validation notes. Open questions and conflicts are preserved rather than invented away.
-
-## Copy-paste demo path
-
-This demo starts from a clean checkout, generates a tiny local audio file, runs the agentic workflow, and produces Markdown, JSON, task, trace, and manifest artifacts. It requires configured provider keys but no hidden services or open ports.
-
-```bash
-git clone https://github.com/AdrianAcala/requirement-maker.git
-cd requirement-maker
-
-python3 -m venv .venv
-.venv/bin/python -m pip install --upgrade pip
-.venv/bin/python -m pip install -e .
-
-export OPENAI_API_KEY="..."
-export ANTHROPIC_API_KEY="..."
-
-.venv/bin/requirement-maker --doctor
-
-ffmpeg -hide_banner -loglevel error -f lavfi \
-  -i "sine=frequency=1000:duration=1" \
-  -ar 16000 -ac 1 demo.wav -y
-
-.venv/bin/requirement-maker demo.wav \
-  --output demo_requirements.md \
-  --json \
-  --tasks \
-  --verbose \
-  --model claude-haiku-4-5-20251001 \
-  --concurrency 1 \
-  --timeout 60 \
-  --retries 1 \
-  --force
-
-ls demo_requirements.md \
-  demo_requirements.json \
-  demo_requirements.tasks.json \
-  demo_requirements.trace.json \
-  demo_requirements.manifest.json
+```text
+meeting_requirements.json          # with --json or make req-json
+meeting_requirements.tasks.json    # with --tasks or make req-tasks
 ```
 
-Do not commit `demo.wav` or generated demo artifacts unless you intentionally create sanitized fixtures. For a dry, no-provider smoke check from a clean checkout, run `.venv/bin/requirement-maker --help` and `.venv/bin/requirement-maker --doctor`.
+The Markdown file is the polished requirements document. The trace and manifest files provide an audit trail of the workflow and generated artifacts.
+
+## Requirements
+
+- Python 3.10+
+- `ffmpeg` and `ffprobe`
+- Real API keys in `.env` or the shell environment:
+  - `OPENAI_API_KEY`
+  - `ANTHROPIC_API_KEY`
+
+Supported inputs include common local audio and video files such as `.mp3`, `.mp4`, `.m4a`, `.wav`, `.webm`, `.mov`, and `.mkv`.
+
+Keep `.env`, real recordings, transcripts, and generated customer artifacts out of commits unless they are intentionally sanitized fixtures.
 
 ## Validation
 
-Local validation uses the Python 3.10+ virtual environment and default tests do not call real providers:
+Run the standard local checks with:
+
+```bash
+make check
+```
+
+This runs:
 
 ```bash
 .venv/bin/python -m pytest -q
 .venv/bin/python -m ruff check .
 .venv/bin/python -m mypy src
-.venv/bin/python -m compileall -q src
-.venv/bin/requirement-maker --help
 ```
 
-The real provider E2E check is explicit opt-in and bounded-cost:
+Default validation does not call real providers. The real provider end-to-end test is opt-in:
 
 ```bash
 REQUIREMENT_MAKER_RUN_REAL_E2E=1 \
   .venv/bin/python -m pytest tests/test_real_provider_e2e.py -m real_provider -q
 ```
-
-## Limitations and safety notes
-
-- Real transcription and generation require valid OpenAI and Anthropic credentials.
-- Provider API usage may incur cost; use tiny media for demos and lower-cost models when appropriate.
-- The CLI processes local files and writes local artifacts only. It does not run a server or require ports.
-- Failed runs should not leave normal completed-looking outputs; existing outputs are protected unless `--force` is provided.
-- Keep `.env`, generated recordings, real meeting transcripts, and generated requirement outputs out of commits unless they are sanitized fixtures.
