@@ -22,4 +22,5 @@ def generate_requirements(
         ],
     )
 
-    return message.content[0].text
+    text_blocks = [block.text for block in message.content if block.type == "text"]
+    return "\n".join(text_blocks)
