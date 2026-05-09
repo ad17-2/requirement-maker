@@ -2,6 +2,11 @@ from dataclasses import dataclass
 
 import anthropic
 
+from requirement_maker.provider_errors import (
+    ProviderStage,
+    classify_provider_exception,
+    retry_exhausted,
+)
 from requirement_maker.prompt import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
 
 
@@ -27,17 +32,27 @@ def generate_requirements(
         max_retries=config.retries,
     )
 
-    message = client.messages.create(
-        model=config.model,
-        max_tokens=16000,
-        system=SYSTEM_PROMPT,
-        messages=[
-            {
-                "role": "user",
-                "content": USER_PROMPT_TEMPLATE.format(transcript=transcript),
-            }
-        ],
-    )
+    try:
+        message = client.messages.create(
+            model=config.model,
+            max_tokens=16000,
+            system=SYSTEM_PROMPT,
+            messages=[
+                {
+                    "role": "user",
+                    "content": USER_PROMPT_TEMPLATE.format(transcript=transcript),
+                }
+            ],
+        )
+    except Exception as exc:
+        error = classify_provider_exception(
+            exc,
+            stage=ProviderStage.REQUIREMENT_GENERATION,
+            provider="Anthropic",
+        )
+        if error.transient:
+            raise retry_exhausted(error) from exc
+        raise error from exc
 
     text_blocks = [block.text for block in message.content if block.type == "text"]
     return "\n".join(text_blocks)

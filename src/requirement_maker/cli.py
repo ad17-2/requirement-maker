@@ -11,6 +11,7 @@ from dotenv import find_dotenv, load_dotenv
 
 from requirement_maker.audio import MediaPreparationError, SUPPORTED_EXTENSIONS, prepare_audio
 from requirement_maker.generate import GenerationConfig, generate_requirements
+from requirement_maker.provider_errors import ProviderError, format_provider_cli_error
 from requirement_maker.transcribe import TranscriptionConfig, transcribe_chunks
 
 
@@ -241,29 +242,35 @@ async def run_pipeline(
             _echo(f"  Transcribed chunk {completed}/{total}", config)
 
         _echo("Transcribing (parallel)...", config)
-        transcript = await transcribe_chunks(
-            audio_chunks,
-            openai_key,
-            on_chunk_done,
-            TranscriptionConfig(
-                model=config.transcription_model,
-                concurrency=config.concurrency,
-                timeout=config.timeout,
-                retries=config.retries,
-            ),
-        )
+        try:
+            transcript = await transcribe_chunks(
+                audio_chunks,
+                openai_key,
+                on_chunk_done,
+                TranscriptionConfig(
+                    model=config.transcription_model,
+                    concurrency=config.concurrency,
+                    timeout=config.timeout,
+                    retries=config.retries,
+                ),
+            )
+        except ProviderError as exc:
+            raise click.ClickException(format_provider_cli_error(exc)) from exc
         _echo(f"  Transcript: {len(transcript)} characters", config)
 
         _echo(f"Generating requirements (model: {config.requirement_model})...", config)
-        requirements = generate_requirements(
-            transcript,
-            anthropic_key,
-            GenerationConfig(
-                model=config.requirement_model,
-                timeout=config.timeout,
-                retries=config.retries,
-            ),
-        )
+        try:
+            requirements = generate_requirements(
+                transcript,
+                anthropic_key,
+                GenerationConfig(
+                    model=config.requirement_model,
+                    timeout=config.timeout,
+                    retries=config.retries,
+                ),
+            )
+        except ProviderError as exc:
+            raise click.ClickException(format_provider_cli_error(exc)) from exc
 
     _atomic_write_text(output, requirements)
     _echo(f"Done: {output}", config)

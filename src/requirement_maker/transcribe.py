@@ -5,6 +5,13 @@ from pathlib import Path
 
 from openai import AsyncOpenAI
 
+from requirement_maker.provider_errors import (
+    ProviderError,
+    ProviderStage,
+    classify_provider_exception,
+    retry_exhausted,
+)
+
 MAX_CONCURRENT = 10
 
 
@@ -25,13 +32,20 @@ async def _transcribe_one(
     model: str = "whisper-1",
 ) -> str:
     async with semaphore:
-        with open(path, "rb") as f:
-            response = await client.audio.transcriptions.create(
-                model=model,
-                file=f,
-                response_format="verbose_json",
-                timestamp_granularities=["segment"],
-            )
+        try:
+            with open(path, "rb") as f:
+                response = await client.audio.transcriptions.create(
+                    model=model,
+                    file=f,
+                    response_format="verbose_json",
+                    timestamp_granularities=["segment"],
+                )
+        except Exception as exc:
+            raise classify_provider_exception(
+                exc,
+                stage=ProviderStage.TRANSCRIPTION,
+                provider="OpenAI",
+            ) from exc
         if on_complete:
             on_complete(index)
         return response.text
@@ -57,5 +71,10 @@ async def transcribe_chunks(
         _transcribe_one(client, path, semaphore, _notify, i, config.model)
         for i, path in enumerate(audio_paths)
     ]
-    results = await asyncio.gather(*tasks)
+    try:
+        results = await asyncio.gather(*tasks)
+    except ProviderError as exc:
+        if exc.transient:
+            raise retry_exhausted(exc) from exc
+        raise
     return "\n\n".join(results)
