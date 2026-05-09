@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -312,6 +313,216 @@ class FinalWorkflowState:
             "critic_findings": [finding.to_dict() for finding in self.critic_findings],
             "conflicts": [item.to_dict() for item in self.conflicts],
         }
+
+
+PUBLIC_ARTIFACT_SCHEMA_VERSION = "requirements-export-v1"
+TASK_HANDOFF_SCHEMA_VERSION = "task-handoff-v1"
+
+
+def render_markdown_document(state: FinalWorkflowState) -> str:
+    sections = [
+        "# Requirements Document",
+        "",
+        "## Executive Summary",
+        _paragraph_from_items(state.requirements, "The recording produced actionable product requirements."),
+        "",
+        "## Background & Context",
+        _paragraph_from_items(state.decisions + state.constraints, "Context should be confirmed with stakeholders."),
+        "",
+        "## Goals & Objectives",
+        _bullet_items(state.requirements, include_acceptance=False),
+        "",
+        "## Functional Requirements",
+        _bullet_items(state.requirements, include_acceptance=True),
+        "",
+        "## Non-Functional Requirements",
+        _bullet_items(state.non_functional_requirements, include_acceptance=True),
+        "",
+        "## User Flows & Scenarios",
+        _user_flow_items(state.requirements),
+        "",
+        "## Data Requirements",
+        _bullet_items(state.constraints, include_acceptance=False, empty="No explicit data requirements were extracted."),
+        "",
+        "## Dependencies & Constraints",
+        _bullet_items(state.constraints + state.risks, include_acceptance=False),
+        "",
+        "## Out of Scope",
+        _bullet_items(state.out_of_scope, include_acceptance=False),
+        "",
+        "## Open Questions & Ambiguities",
+        _bullet_items(state.open_questions, include_acceptance=False),
+        "",
+        "## Participants & Decisions",
+        _bullet_items(state.decisions, include_acceptance=False),
+        "",
+        "## Action & Task Candidates",
+        _task_markdown_items(state.task_candidates),
+        "",
+        "## Source Traceability",
+        _traceability_items(_all_public_items(state)),
+        "",
+    ]
+    return "\n".join(sections).rstrip() + "\n"
+
+
+def render_json_export(state: FinalWorkflowState) -> str:
+    payload = {
+        "schema_version": PUBLIC_ARTIFACT_SCHEMA_VERSION,
+        "summary": {
+            "requirement_count": len(state.requirements),
+            "decision_count": len(state.decisions),
+            "open_question_count": len(state.open_questions),
+            "task_count": len(state.task_candidates),
+        },
+        "requirements": [_export_item(item, item_type="functional") for item in state.requirements],
+        "non_functional_requirements": [
+            _export_item(item, item_type="non_functional")
+            for item in state.non_functional_requirements
+        ],
+        "user_flows": [
+            {
+                "id": f"flow-{index:04d}",
+                "requirement_id": item.id,
+                "title": _safe_public_text(item.title),
+                "steps": [
+                    "Actor initiates the workflow.",
+                    _safe_public_text(item.summary),
+                    "System provides a verifiable outcome.",
+                ],
+                "source_refs": [_export_source_ref(ref) for ref in item.source_refs],
+            }
+            for index, item in enumerate(state.requirements, start=1)
+        ],
+        "data_requirements": [_export_item(item, item_type="constraint") for item in state.constraints],
+        "dependencies": [_export_item(item, item_type="risk") for item in state.risks],
+        "out_of_scope": [_export_item(item, item_type="out_of_scope") for item in state.out_of_scope],
+        "open_questions": [_export_item(item, item_type="open_question") for item in state.open_questions],
+        "decisions": [_export_item(item, item_type="decision") for item in state.decisions],
+        "task_candidates": [_export_task(item) for item in state.task_candidates],
+        "critic_findings": [finding.to_dict() for finding in state.critic_findings],
+    }
+    return json.dumps(payload, indent=2, sort_keys=True) + "\n"
+
+
+def render_task_export(state: FinalWorkflowState) -> str:
+    payload = {
+        "schema_version": TASK_HANDOFF_SCHEMA_VERSION,
+        "tasks": [_export_task(item) for item in state.task_candidates],
+    }
+    return json.dumps(payload, indent=2, sort_keys=True) + "\n"
+
+
+def _all_public_items(state: FinalWorkflowState) -> list[StructuredItem]:
+    return (
+        state.decisions
+        + state.requirements
+        + state.non_functional_requirements
+        + state.risks
+        + state.constraints
+        + state.open_questions
+        + state.out_of_scope
+        + state.task_candidates
+    )
+
+
+def _paragraph_from_items(items: list[StructuredItem], empty: str) -> str:
+    if not items:
+        return empty
+    return " ".join(f"{item.title}: {_safe_public_text(item.summary)}" for item in items[:3])
+
+
+def _bullet_items(
+    items: list[StructuredItem],
+    *,
+    include_acceptance: bool,
+    empty: str = "No explicit items were extracted.",
+) -> str:
+    if not items:
+        return f"- {empty}"
+    lines: list[str] = []
+    for item in items:
+        lines.append(f"- **{item.id} — {_safe_public_text(item.title)}**: {_safe_public_text(item.summary)}")
+        if include_acceptance:
+            lines.append(
+                f"  - Acceptance criteria: verify `{item.id}` by confirming the stated actor, action, and outcome."
+            )
+    return "\n".join(lines)
+
+
+def _user_flow_items(items: list[StructuredItem]) -> str:
+    if not items:
+        return "- No user flows were explicitly extracted."
+    lines: list[str] = []
+    for index, item in enumerate(items, start=1):
+        lines.append(f"- **flow-{index:04d} / {item.id} — {_safe_public_text(item.title)}**")
+        lines.append("  1. Actor starts the scenario.")
+        lines.append(f"  2. System supports: {_safe_public_text(item.summary)}")
+        lines.append("  3. Actor receives a testable outcome.")
+    return "\n".join(lines)
+
+
+def _task_markdown_items(items: list[StructuredItem]) -> str:
+    if not items:
+        return "- No implementation tasks were explicitly extracted."
+    lines: list[str] = []
+    for item in items:
+        lines.append(f"- **{item.id} — {_safe_public_text(item.title)}**")
+        lines.append(f"  - Description: {_safe_public_text(item.summary)}")
+        lines.append("  - Priority: infer from linked requirement criticality")
+        lines.append("  - Validation: confirm acceptance criteria and source trace before implementation")
+    return "\n".join(lines)
+
+
+def _traceability_items(items: list[StructuredItem]) -> str:
+    if not items:
+        return "- No source-linked items were extracted."
+    return "\n".join(
+        f"- **{item.id}** → "
+        + ", ".join(f"{ref.chunk_id}: {_safe_public_text(ref.snippet)}" for ref in item.source_refs)
+        for item in items
+    )
+
+
+def _export_item(item: StructuredItem, *, item_type: str) -> dict[str, Any]:
+    return {
+        "id": item.id,
+        "type": item_type,
+        "status": "proposed",
+        "title": _safe_public_text(item.title),
+        "summary": _safe_public_text(item.summary),
+        "source_refs": [_export_source_ref(ref) for ref in item.source_refs],
+        "source_unit_ids": item.source_unit_ids,
+    }
+
+
+def _export_task(item: StructuredItem) -> dict[str, Any]:
+    return {
+        "id": item.id,
+        "type": "implementation_task",
+        "status": "candidate",
+        "title": _safe_public_text(item.title),
+        "description": _safe_public_text(item.summary),
+        "acceptance_criteria": [
+            f"Implement behavior described by {item.id}.",
+            "Verify the behavior against linked source references.",
+        ],
+        "priority": "infer_from_context",
+        "dependencies": [],
+        "source_refs": [_export_source_ref(ref) for ref in item.source_refs],
+        "source_unit_ids": item.source_unit_ids,
+    }
+
+
+def _export_source_ref(ref: SourceRef) -> dict[str, str]:
+    return {"chunk_id": ref.chunk_id, "snippet": _safe_public_text(ref.snippet)}
+
+
+def _safe_public_text(value: str) -> str:
+    sanitized = re.sub(r"(?i)\b(?:sk|sk-ant|sk-proj)-[A-Za-z0-9_-]+", "[redacted-secret]", value)
+    sanitized = re.sub(r"/Users/[^\s,;:]+", "[redacted-local-path]", sanitized)
+    sanitized = re.sub(r"(?i)(authorization:\s*bearer\s+)[A-Za-z0-9._-]+", r"\1[redacted-secret]", sanitized)
+    return sanitized
 
 
 @dataclass(frozen=True)

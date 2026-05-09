@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import os
 import shutil
@@ -16,6 +17,9 @@ from requirement_maker.transcribe import TranscriptionConfig, transcribe_chunks
 from requirement_maker.workflow import (
     WorkflowConfig,
     make_workflow_provider,
+    render_json_export,
+    render_markdown_document,
+    render_task_export,
     run_agentic_workflow,
 )
 
@@ -211,6 +215,63 @@ def _trace_output_path(output: Path) -> Path:
     return output.with_name(f"{output.stem}.trace.json")
 
 
+def _json_output_path(output: Path) -> Path:
+    return output.with_suffix(".json")
+
+
+def _task_output_path(output: Path) -> Path:
+    return output.with_name(f"{output.stem}.tasks.json")
+
+
+def _manifest_output_path(output: Path) -> Path:
+    return output.with_name(f"{output.stem}.manifest.json")
+
+
+def _artifact_paths(output: Path, *, include_json: bool, include_tasks: bool) -> dict[str, Path]:
+    paths = {
+        "markdown": output,
+        "trace": _trace_output_path(output),
+        "manifest": _manifest_output_path(output),
+    }
+    if include_json:
+        paths["json"] = _json_output_path(output)
+    if include_tasks:
+        paths["tasks"] = _task_output_path(output)
+    return paths
+
+
+def _validate_artifact_paths(input_file: Path, paths: dict[str, Path], *, force: bool) -> None:
+    seen: dict[Path, str] = {}
+    for kind, path in paths.items():
+        _validate_output_path(input_file, path, force=force)
+        resolved = path.resolve()
+        if resolved in seen:
+            _fail(f"Artifact path for {kind} conflicts with {seen[resolved]}: {path}")
+        seen[resolved] = kind
+
+
+def _public_artifact_path(path: Path) -> str:
+    try:
+        return path.relative_to(Path.cwd()).as_posix()
+    except ValueError:
+        return path.name
+
+
+def _render_manifest(paths: dict[str, Path]) -> str:
+    payload = {
+        "schema_version": "artifact-manifest-v1",
+        "artifacts": [
+            {
+                "kind": kind,
+                "path": _public_artifact_path(path),
+                "exists": True,
+            }
+            for kind, path in sorted(paths.items())
+        ],
+    }
+    return json.dumps(payload, indent=2, sort_keys=True) + "\n"
+
+
 def _run_doctor() -> None:
     load_dotenv(dotenv_path=find_dotenv(usecwd=True))
     click.echo("Diagnostics")
@@ -235,6 +296,9 @@ async def run_pipeline(
     config: RuntimeConfig,
     openai_key: str,
     anthropic_key: str,
+    *,
+    include_json: bool = False,
+    include_tasks: bool = False,
 ) -> None:
     _echo(f"Processing: {input_file}", config)
 
@@ -296,18 +360,31 @@ async def run_pipeline(
         except ValueError as exc:
             raise click.ClickException(f"Requirement workflow failed: {exc}") from exc
 
-    trace_output = _trace_output_path(output)
+    artifact_paths = _artifact_paths(output, include_json=include_json, include_tasks=include_tasks)
+    trace_output = artifact_paths["trace"]
     workflow_result.trace.final_artifacts = {
-        "markdown": str(output),
-        "trace": str(trace_output),
+        kind: _public_artifact_path(path)
+        for kind, path in sorted(artifact_paths.items())
+        if kind != "manifest"
     }
-    _atomic_write_text(output, workflow_result.markdown)
+    markdown = (
+        render_markdown_document(workflow_result.final_state)
+        if hasattr(workflow_result, "final_state")
+        else workflow_result.markdown
+    )
+    _atomic_write_text(output, markdown)
+    if include_json and hasattr(workflow_result, "final_state"):
+        _atomic_write_text(artifact_paths["json"], render_json_export(workflow_result.final_state))
+    if include_tasks and hasattr(workflow_result, "final_state"):
+        _atomic_write_text(artifact_paths["tasks"], render_task_export(workflow_result.final_state))
     _atomic_write_text(
         trace_output,
         json.dumps(workflow_result.trace.to_dict(), indent=2, sort_keys=True) + "\n",
     )
+    _atomic_write_text(artifact_paths["manifest"], _render_manifest(artifact_paths))
     _echo(f"Done: {output}", config)
     _echo(f"Trace: {trace_output}", config)
+    _echo(f"Manifest: {artifact_paths['manifest']}", config)
 
 
 @click.command(
@@ -332,6 +409,8 @@ async def run_pipeline(
 @click.option("--verbose", is_flag=True, help="Print pipeline stages and resolved runtime configuration.")
 @click.option("--quiet", is_flag=True, help="Suppress non-error progress output on success.")
 @click.option("--force", is_flag=True, help="Overwrite an existing output file.")
+@click.option("--json", "include_json", is_flag=True, help="Write a versioned structured JSON export next to Markdown.")
+@click.option("--tasks", "include_tasks", is_flag=True, help="Write a versioned task handoff JSON export next to Markdown.")
 @click.option("--doctor", is_flag=True, help="Run safe environment diagnostics and setup guidance.")
 def main(
     input_file: Path | None,
@@ -344,6 +423,8 @@ def main(
     verbose: bool,
     quiet: bool,
     force: bool,
+    include_json: bool,
+    include_tasks: bool,
     doctor: bool,
 ) -> None:
     """Convert audio/video recordings into comprehensive requirement documents."""
@@ -365,8 +446,32 @@ def main(
     if output is None:
         output = _default_output_path(input_file)
     output = _validate_output_path(input_file, output, force=force)
+    _validate_artifact_paths(
+        input_file,
+        _artifact_paths(output, include_json=include_json, include_tasks=include_tasks),
+        force=force,
+    )
 
     openai_key, anthropic_key = _load_credentials()
     _print_runtime_config(config)
 
-    asyncio.run(run_pipeline(input_file, output, config, openai_key, anthropic_key))
+    pipeline_kwargs = {"include_json": include_json, "include_tasks": include_tasks}
+    if not any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in inspect.signature(run_pipeline).parameters.values()
+    ):
+        pipeline_kwargs = {
+            key: value
+            for key, value in pipeline_kwargs.items()
+            if key in inspect.signature(run_pipeline).parameters
+        }
+    asyncio.run(
+        run_pipeline(
+            input_file,
+            output,
+            config,
+            openai_key,
+            anthropic_key,
+            **pipeline_kwargs,
+        )
+    )
