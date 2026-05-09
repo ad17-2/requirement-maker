@@ -19,3 +19,8 @@ requirement-maker = "requirement_maker.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/requirement_maker"]
+
+[tool.pytest.ini_options]
+markers = [
+    "real_provider: opt-in tests that call real OpenAI and Anthropic APIs",
+]
