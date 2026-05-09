@@ -626,8 +626,9 @@ class AnthropicWorkflowProvider:
         self.config = config
 
     def complete_json(self, request: WorkflowProviderRequest) -> dict[str, Any]:
+        prompt = _provider_json_prompt(request.stage, request.payload)
         return generate_structured_json(
-            request.payload,
+            prompt,
             self.api_key,
             GenerationConfig(
                 model=self.config.model,
@@ -781,8 +782,22 @@ class AgenticWorkflow:
 
     def _plan(self, chunks: list[TranscriptChunk], valid_chunk_ids: set[str]) -> WorkflowPlan:
         payload = {
-            "instruction": "Create extraction units before any extraction. Return JSON with units.",
-            "required_unit_fields": ["id", "focus", "source_chunk_ids"],
+            "instruction": (
+                "Create extraction units before any extraction. Return ONLY a JSON object with a "
+                "non-empty `units` array. Each unit must have string fields `id` and `focus`, "
+                "plus `source_chunk_ids` containing one or more IDs from the provided chunks. "
+                "For a short transcript, return exactly one unit that references every chunk."
+            ),
+            "required_schema": {
+                "units": [
+                    {
+                        "id": "unit-1",
+                        "focus": "Short description of the product area",
+                        "source_chunk_ids": ["chunk-0001"],
+                    }
+                ]
+            },
+            "valid_chunk_ids": [chunk.id for chunk in chunks],
             "chunks": self._budgeted_chunk_dicts(chunks),
         }
         if self.config.request_budget_chars is not None:
@@ -855,9 +870,23 @@ class AgenticWorkflow:
             payload={
                 "instruction": (
                     "Extract all required product signals with source_refs. "
-                    "Return every category even when empty."
+                    "Return ONLY a JSON object. Include every required category key even when "
+                    "the category has no items, using an empty array. Every item must have "
+                    "`title`, `summary`, and non-empty `source_refs`; each source ref must use "
+                    "a valid `chunk_id` from the selected chunks and a short supporting `snippet`."
                 ),
                 "required_categories": list(PRODUCT_SIGNAL_CATEGORIES),
+                "required_item_schema": {
+                    "title": "Concise item title",
+                    "summary": "Testable product signal summary",
+                    "source_refs": [
+                        {
+                            "chunk_id": selected_chunks[0].id if selected_chunks else "chunk-0001",
+                            "snippet": "Short quote or paraphrase from the selected chunk",
+                        }
+                    ],
+                },
+                "empty_category_value": [],
                 "unit": unit.to_dict(),
                 "chunks": [chunk.to_dict() for chunk in selected_chunks],
             },
@@ -1083,6 +1112,31 @@ def run_agentic_workflow(
     config: WorkflowConfig,
 ) -> WorkflowResult:
     return AgenticWorkflow(provider, config).run(transcript)
+
+
+def _provider_json_prompt(stage: str, payload: str) -> str:
+    stage_schemas = {
+        "planner": (
+            'Return exactly: {"units":[{"id":"unit-1","focus":"...","source_chunk_ids":["chunk-0001"]}]}. '
+            "The units array must be non-empty and every source_chunk_ids value must come from the input chunks."
+        ),
+        "extractor": (
+            "Return exactly one object with all eight keys: decisions, functional_requirements, "
+            "non_functional_requirements, risks, constraints, open_questions, out_of_scope, task_candidates. "
+            'Use [] for empty categories. Non-empty item shape is {"title":"...","summary":"...",'
+            '"source_refs":[{"chunk_id":"chunk-0001","snippet":"..."}]}.'
+        ),
+        "critic": (
+            'Return exactly: {"findings":[],"remove_item_ids":[],"add_open_questions":[]}. '
+            "If adding an open question, use the same title/summary/source_refs item shape."
+        ),
+    }
+    schema = stage_schemas.get(stage, "Return only the requested JSON object.")
+    return (
+        f"You are the {stage} stage of a requirements extraction workflow. {schema}\n"
+        "Do not include markdown fences, commentary, alternate keys, or omitted required keys.\n\n"
+        f"Input JSON:\n{payload}"
+    )
 
 
 def chunk_transcript(transcript: str, max_chunk_chars: int = 6000) -> list[TranscriptChunk]:
