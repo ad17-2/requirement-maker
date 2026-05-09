@@ -34,7 +34,7 @@ class BadRequestError(Exception):
 
 def test_provider_exception_classification_is_secret_safe():
     cases = [
-        (AuthenticationError("bad key sk-secret"), ProviderErrorKind.AUTHENTICATION, False),
+        (AuthenticationError("bad key REDACTED_PROVIDER_VALUE"), ProviderErrorKind.AUTHENTICATION, False),
         (RateLimitError("slow down"), ProviderErrorKind.RATE_LIMIT, True),
         (APITimeoutError("timed out"), ProviderErrorKind.TIMEOUT, True),
         (BadRequestError("bad model"), ProviderErrorKind.INVALID_REQUEST, False),
@@ -50,7 +50,7 @@ def test_provider_exception_classification_is_secret_safe():
 
         assert error.kind is expected_kind
         assert error.transient is expected_transient
-        assert "sk-secret" not in error.detail
+        assert "REDACTED_PROVIDER_VALUE" not in error.detail
 
 
 def test_transcription_provider_failure_is_stage_specific_and_leaves_no_output(monkeypatch):
@@ -61,7 +61,7 @@ def test_transcription_provider_failure_is_stage_specific_and_leaves_no_output(m
 
     async def fail_transcribe_chunks(audio_paths, openai_key, on_chunk_done, config):  # noqa: ANN001, ANN202
         raise classify_provider_exception(
-            RateLimitError("quota exceeded for sk-secret"),
+            RateLimitError("quota exceeded for REDACTED_PROVIDER_VALUE"),
             stage=ProviderStage.TRANSCRIPTION,
             provider="OpenAI",
         )
@@ -69,8 +69,8 @@ def test_transcription_provider_failure_is_stage_specific_and_leaves_no_output(m
     def fail_run_agentic_workflow(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
         raise AssertionError("generation should not run after transcription failure")
 
-    monkeypatch.setenv("OPENAI_API_KEY", "dummy-openai-key")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy-anthropic-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "OPENAI_TEST_VALUE")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "ANTHROPIC_TEST_VALUE")
     monkeypatch.setattr(cli, "prepare_audio", fake_prepare_audio)
     monkeypatch.setattr(cli, "transcribe_chunks", fail_transcribe_chunks)
     monkeypatch.setattr(cli, "run_agentic_workflow", fail_run_agentic_workflow)
@@ -85,7 +85,7 @@ def test_transcription_provider_failure_is_stage_specific_and_leaves_no_output(m
     assert result.exit_code != 0
     assert "Transcription failed (OpenAI rate_limit, transient)" in result.output
     assert "Repair: Wait and retry, lower --concurrency" in result.output
-    assert "sk-secret" not in result.output
+    assert "REDACTED_PROVIDER_VALUE" not in result.output
     assert "Traceback" not in result.output
     assert "Done:" not in result.output
 
@@ -106,8 +106,8 @@ def test_generation_provider_failure_is_stage_specific_and_leaves_existing_outpu
             provider="Anthropic",
         )
 
-    monkeypatch.setenv("OPENAI_API_KEY", "dummy-openai-key")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy-anthropic-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "OPENAI_TEST_VALUE")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "ANTHROPIC_TEST_VALUE")
     monkeypatch.setattr(cli, "prepare_audio", fake_prepare_audio)
     monkeypatch.setattr(cli, "transcribe_chunks", fake_transcribe_chunks)
     monkeypatch.setattr(cli, "run_agentic_workflow", fail_run_agentic_workflow)

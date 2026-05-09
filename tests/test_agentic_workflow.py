@@ -232,8 +232,8 @@ def test_cli_exposes_agentic_workflow_and_writes_trace(monkeypatch) -> None:
         on_chunk_done(1, 1)
         return "Authentication discussion.\n\nBilling discussion."
 
-    monkeypatch.setenv("OPENAI_API_KEY", "dummy-openai-key")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy-anthropic-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "OPENAI_TEST_VALUE")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "ANTHROPIC_TEST_VALUE")
     monkeypatch.setattr(cli, "prepare_audio", fake_prepare_audio)
     monkeypatch.setattr(cli, "transcribe_chunks", fake_transcribe_chunks)
     monkeypatch.setattr(cli, "make_workflow_provider", lambda api_key, config: provider)

@@ -61,8 +61,8 @@ def test_cli_success_path_uses_mocked_boundaries(monkeypatch):
             trace=FakeTrace(),
         )
 
-    monkeypatch.setenv("OPENAI_API_KEY", "dummy-openai-key")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy-anthropic-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "OPENAI_TEST_VALUE")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "ANTHROPIC_TEST_VALUE")
     monkeypatch.setattr(cli, "prepare_audio", fake_prepare_audio)
     monkeypatch.setattr(cli, "transcribe_chunks", fake_transcribe_chunks)
     monkeypatch.setattr(cli, "run_agentic_workflow", fake_run_agentic_workflow)
@@ -78,7 +78,7 @@ def test_cli_success_path_uses_mocked_boundaries(monkeypatch):
     assert result.exit_code == 0
     assert calls == [
         "prepare:meeting.mp3",
-        "transcribe:dummy-openai-key:1:whisper-1:10:60.0:2",
+        "transcribe:OPENAI_TEST_VALUE:1:whisper-1:10:60.0:2",
         "generate:claude-sonnet-4-5-20250929:Mocked transcript",
     ]
 
@@ -95,8 +95,8 @@ def test_cli_custom_output_path_uses_mocked_boundaries(monkeypatch):
     def fake_run_agentic_workflow(transcript: str, provider, config):  # noqa: ANN001
         return SimpleNamespace(markdown="Custom output", trace=FakeTrace())
 
-    monkeypatch.setenv("OPENAI_API_KEY", "dummy-openai-key")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy-anthropic-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "OPENAI_TEST_VALUE")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "ANTHROPIC_TEST_VALUE")
     monkeypatch.setattr(cli, "prepare_audio", fake_prepare_audio)
     monkeypatch.setattr(cli, "transcribe_chunks", fake_transcribe_chunks)
     monkeypatch.setattr(cli, "run_agentic_workflow", fake_run_agentic_workflow)
@@ -149,8 +149,8 @@ def test_runtime_options_are_validated_and_applied(monkeypatch):
         seen.append(config)
         output.write_text("ok", encoding="utf-8")
 
-    monkeypatch.setenv("OPENAI_API_KEY", "dummy-openai-key")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy-anthropic-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "OPENAI_TEST_VALUE")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "ANTHROPIC_TEST_VALUE")
     monkeypatch.setattr(cli, "run_pipeline", fake_run_pipeline)
 
     with runner.isolated_filesystem():
@@ -208,8 +208,8 @@ def test_option_precedence_and_verbose_quiet_conflict(monkeypatch):
         seen.append(config)
         output.write_text("ok", encoding="utf-8")
 
-    monkeypatch.setenv("OPENAI_API_KEY", "dummy-openai-key")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy-anthropic-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "OPENAI_TEST_VALUE")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "ANTHROPIC_TEST_VALUE")
     monkeypatch.setenv("REQUIREMENT_MAKER_MODEL", "env-claude")
     monkeypatch.setenv("REQUIREMENT_MAKER_TRANSCRIPTION_MODEL", "env-whisper")
     monkeypatch.setenv("REQUIREMENT_MAKER_CONCURRENCY", "2")
@@ -275,8 +275,8 @@ def test_quiet_success_suppresses_progress_and_failures_use_stderr(monkeypatch):
     ) -> None:
         output.write_text("ok", encoding="utf-8")
 
-    monkeypatch.setenv("OPENAI_API_KEY", "dummy-openai-key")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy-anthropic-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "OPENAI_TEST_VALUE")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "ANTHROPIC_TEST_VALUE")
     monkeypatch.setattr(cli, "run_pipeline", fake_run_pipeline)
 
     with runner.isolated_filesystem():
@@ -296,8 +296,8 @@ def test_existing_output_requires_force_before_pipeline(monkeypatch):
     async def fail_run_pipeline(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
         raise AssertionError("pipeline should not run when output is protected")
 
-    monkeypatch.setenv("OPENAI_API_KEY", "dummy-openai-key")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy-anthropic-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "OPENAI_TEST_VALUE")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "ANTHROPIC_TEST_VALUE")
     monkeypatch.setattr(cli, "run_pipeline", fail_run_pipeline)
 
     with runner.isolated_filesystem():
@@ -326,8 +326,8 @@ def test_force_allows_existing_output_replacement(monkeypatch):
     ) -> None:
         output.write_text("replacement", encoding="utf-8")
 
-    monkeypatch.setenv("OPENAI_API_KEY", "dummy-openai-key")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy-anthropic-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "OPENAI_TEST_VALUE")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "ANTHROPIC_TEST_VALUE")
     monkeypatch.setattr(cli, "run_pipeline", fake_run_pipeline)
 
     with runner.isolated_filesystem():
@@ -381,8 +381,8 @@ def test_atomic_write_preserves_previous_output_on_failure(monkeypatch):
     def fail_replace(src: Path, dst: Path) -> None:
         raise OSError("simulated replace failure")
 
-    monkeypatch.setenv("OPENAI_API_KEY", "dummy-openai-key")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy-anthropic-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "OPENAI_TEST_VALUE")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "ANTHROPIC_TEST_VALUE")
     monkeypatch.setattr(cli, "prepare_audio", fake_prepare_audio)
     monkeypatch.setattr(cli, "transcribe_chunks", fake_transcribe_chunks)
     monkeypatch.setattr(cli, "run_agentic_workflow", fake_run_agentic_workflow)

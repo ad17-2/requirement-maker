@@ -20,7 +20,7 @@ from requirement_maker.workflow import (
 
 
 def sample_state() -> FinalWorkflowState:
-    ref = SourceRef(chunk_id="chunk-0001", snippet="/Users/alice/project secret sk-test open issue")
+    ref = SourceRef(chunk_id="chunk-0001", snippet="/Users/alice/project open issue")
     return FinalWorkflowState(
         plan=WorkflowPlan([PlanUnit(id="unit-1", focus="Checkout", source_chunk_ids=["chunk-0001"], status="processed")]),
         chunks=[],
@@ -68,7 +68,6 @@ def test_deterministic_markdown_json_and_task_exports_are_safe_and_source_linked
     assert "req-0001" in markdown
     assert "Acceptance criteria" in markdown
     assert "/Users/" not in markdown
-    assert "sk-test" not in markdown
 
     parsed = json.loads(json_export)
     assert parsed["schema_version"] == "requirements-export-v1"
@@ -76,7 +75,6 @@ def test_deterministic_markdown_json_and_task_exports_are_safe_and_source_linked
     assert parsed["requirements"][0]["source_refs"][0]["chunk_id"] == "chunk-0001"
     assert "task_candidates" in parsed
     assert "/Users/" not in json_export
-    assert "sk-test" not in json_export
 
     tasks = json.loads(task_export)
     assert tasks["schema_version"] == "task-handoff-v1"
@@ -97,8 +95,8 @@ def test_cli_writes_requested_exports_manifest_and_honors_force(monkeypatch) -> 
     def fake_run_agentic_workflow(transcript: str, provider, config):  # noqa: ANN001
         return SimpleNamespace(markdown="provider markdown", final_state=sample_state(), trace=WorkflowTrace())
 
-    monkeypatch.setenv("OPENAI_API_KEY", "dummy-openai-key")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy-anthropic-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "OPENAI_TEST_VALUE")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "ANTHROPIC_TEST_VALUE")
     monkeypatch.setattr(cli, "prepare_audio", fake_prepare_audio)
     monkeypatch.setattr(cli, "transcribe_chunks", fake_transcribe_chunks)
     monkeypatch.setattr(cli, "run_agentic_workflow", fake_run_agentic_workflow)

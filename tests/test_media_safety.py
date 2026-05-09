@@ -16,8 +16,8 @@ def test_corrupt_supported_media_fails_without_provider_calls(monkeypatch):
     def fail_run_agentic_workflow(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
         raise AssertionError("generation should not run after media preparation failure")
 
-    monkeypatch.setenv("OPENAI_API_KEY", "dummy-openai-key")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy-anthropic-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "OPENAI_TEST_VALUE")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "ANTHROPIC_TEST_VALUE")
     monkeypatch.setattr(cli, "transcribe_chunks", fail_transcribe_chunks)
     monkeypatch.setattr(cli, "run_agentic_workflow", fail_run_agentic_workflow)
 
